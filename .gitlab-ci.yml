@@ -1,0 +1,114 @@
+# You can override the included template(s) by including variable overrides
+# SAST customization: https://docs.gitlab.com/ee/user/application_security/sast/#customizing-the-sast-settings
+# Secret Detection customization: https://docs.gitlab.com/ee/user/application_security/secret_detection/#customizing-settings
+# Dependency Scanning customization: https://docs.gitlab.com/ee/user/application_security/dependency_scanning/#customizing-the-dependency-scanning-settings
+# Container Scanning customization: https://docs.gitlab.com/ee/user/application_security/container_scanning/#customizing-the-container-scanning-settings
+# Note that environment variables can be set in several places
+# See https://docs.gitlab.com/ee/ci/variables/#cicd-variable-precedence
+stages:
+- build
+- test
+- train
+- predict
+- predict-build
+- deploy
+
+variables:
+  http_proxy: http://Clash:7890
+  https_proxy: http://Clash:7890
+  NO_PROXY: "GitLab"
+  CI_REGISTRY_IMAGE: "ccr.ccs.tencentyun.com/tabll/tenserflow-workflow"
+  DOCKER_IMAGE: "ccr.ccs.tencentyun.com/tabll/tenserflow-workflow:dev"
+  DOCKER_USER: "$TENCENT_REGISTRY_USERNAME"
+  DOCKER_PASSWORD: "$TENCENT_REGISTRY_PASSWORD"
+
+cache:
+  paths:
+    - .cache/pip
+    - venv/
+
+# 构建 develop 分支镜像
+build:
+  image: docker:latest
+  stage: build
+  tags:
+    - docker
+  before_script:
+    - docker login -u "$TENCENT_REGISTRY_USERNAME" -p "$TENCENT_REGISTRY_PASSWORD" ccr.ccs.tencentyun.com
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:dev" . --network=gitLab_runner_bridge
+    - docker push "$CI_REGISTRY_IMAGE:dev"
+  except:
+    - tags
+
+# 发布
+publish:
+  image: docker:latest
+  stage: build
+  tags:
+    - docker
+  before_script:
+    - docker login -u "$TENCENT_REGISTRY_USERNAME" -p "$TENCENT_REGISTRY_PASSWORD" ccr.ccs.tencentyun.com
+  script:
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG" . --network=gitLab_runner_bridge
+    - docker push "$CI_REGISTRY_IMAGE:$CI_COMMIT_TAG"
+  only:
+    - tags
+
+train:
+  image: $CI_REGISTRY_IMAGE:dev
+  stage: train
+  tags:
+    - docker
+  script:
+    python /home/app/main.py
+  needs: ["build"]
+  artifacts:
+    paths:
+      - outputs
+
+predict:
+  image: $CI_REGISTRY_IMAGE:dev
+  stage: predict
+  tags:
+    - docker
+  script:
+    - cd deploy
+    - python run.py
+  needs: ["train"]
+  dependencies:
+    [train]
+
+build-for-predict:
+  image: docker:latest
+  stage: predict-build
+  tags:
+    - docker
+  before_script:
+    - docker login -u "$TENCENT_REGISTRY_USERNAME" -p "$TENCENT_REGISTRY_PASSWORD" ccr.ccs.tencentyun.com
+  script:
+    - cp -r ./outputs ./deploy/outputs
+    - cd deploy
+    - docker build --pull -t "$CI_REGISTRY_IMAGE:predict" . --network=gitLab_runner_bridge
+    - docker push "$CI_REGISTRY_IMAGE:predict"
+  needs: ["predict", "train"]
+  dependencies:
+    [train]
+
+deploy:
+  image: docker:latest
+  stage: deploy
+  tags:
+    - docker
+  before_script:
+    - docker login -u "$TENCENT_REGISTRY_USERNAME" -p "$TENCENT_REGISTRY_PASSWORD" ccr.ccs.tencentyun.com
+  script:
+    - docker run "$CI_REGISTRY_IMAGE:predict"
+  needs: ["build-for-predict"]
+
+include:
+  - template: Security/Container-Scanning.gitlab-ci.yml
+  - template: Dependency-Scanning.gitlab-ci.yml
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/License-Scanning.gitlab-ci.yml

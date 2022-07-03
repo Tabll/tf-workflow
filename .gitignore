@@ -1,0 +1,6 @@
+*.tar.gz
+.idea
+aclImdb
+logs
+outputs
+*/__pycache__/*
